@@ -517,6 +517,49 @@ button{{padding:10px 18px;margin-bottom:12px}}
 </body></html>"""
     return html.encode("utf-8")
 
+def doctor_time_table_export():
+    """تصدير جدول شبكي (دكاترة × أوقات) كملف HTML"""
+    doctors = list(D["doctors"].keys())
+    times = TIME_LABELS
+    
+    # بناء الصفوف: لكل دكتور صف، ولكل وقت خلية
+    rows = []
+    for doc in doctors:
+        row_cells = []
+        for t in times:
+            # العثور على محاضرات هذا الدكتور في هذا الوقت
+            events = [e for e in D["schedule"] if e["doctor"] == doc and e["time"] == t]
+            if events:
+                cell_content = "<br>".join(
+                    f'{e["course"]}<br><small>{e["day"]} - شعبة {e.get("section","1")}</small>'
+                    for e in events
+                )
+                row_cells.append(f'<td style="background:{doctor_color(doc)}">{cell_content}</td>')
+            else:
+                row_cells.append("<td></td>")
+        rows.append(f"<tr><th>{doc}</th>{''.join(row_cells)}</tr>")
+
+    html = f"""<!doctype html>
+<html lang="ar" dir="rtl">
+<head><meta charset="utf-8"><title>جدول الدكاترة</title>
+<style>
+body{{font-family:Arial,Tahoma,sans-serif;direction:rtl;margin:20px}}
+h2{{text-align:center}}
+table{{border-collapse:collapse;width:100%;table-layout:fixed;font-size:12px}}
+th,td{{border:1px solid #333;padding:6px;text-align:center;vertical-align:middle}}
+th{{background:#1f4e78;color:white}}
+td{{min-width:80px}}
+</style></head>
+<body>
+<h2>جدول الدكاترة والأوقات</h2>
+<table>
+<thead><tr><th>الدكتور</th>{''.join(f"<th>{t}</th>" for t in times)}</tr></thead>
+<tbody>{''.join(rows)}</tbody>
+</table>
+<br><button onclick='window.print()'>طباعة / PDF</button>
+</body></html>"""
+    return html.encode("utf-8")
+
 def doctor_html_export(doctor_name):
     events = [e for e in D["schedule"] if e["doctor"] == doctor_name]
     if not events:
@@ -554,25 +597,27 @@ th{{background:#1f4e78;color:white}}
     return html.encode("utf-8")
 
 # ============================================================
-# الواجهة التفاعلية Drag & Drop (بدون حفظ تلقائي)
+# الواجهة التفاعلية (بدون حفظ تلقائي للسحب)
 # ============================================================
 def render_drag_drop():
-    events = []
+    doctors = list(D["doctors"].keys())
+    times = TIME_LABELS
+
+    # تجهيز بيانات المحاضرات لكل خلية (doctor, time)
+    grid_data = {}
     for e in D["schedule"]:
-        events.append({
-            "id": e["id"],
-            "course": e["course"],
-            "doctor": e["doctor"],
-            "day": e["day"],
-            "time": e["time"],
-            "section": e.get("section","1"),
-            "color": doctor_color(e["doctor"]),
-        })
+        key = (e["doctor"], e["time"])
+        if key not in grid_data:
+            grid_data[key] = []
+        grid_data[key].append(e)
 
     payload = {
-        "days": DAY_PATTERNS,
-        "times": TIME_LABELS,
-        "events": events,
+        "doctors": doctors,
+        "times": times,
+        "grid": {f"{doc}||{t}": [
+            {"id": e["id"], "course": e["course"], "day": e["day"], "section": e.get("section","1"), "color": e["color"]}
+            for e in grid_data.get((doc, t), [])
+        ] for doc in doctors for t in times}
     }
 
     component = f"""
@@ -584,19 +629,19 @@ def render_drag_drop():
 *{{box-sizing:border-box}}
 body{{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f8fafc;color:#0f172a}}
 .wrap{{direction:rtl;overflow:auto;border:1px solid #cbd5e1;border-radius:14px;background:white}}
-.grid{{display:grid;grid-template-columns:150px repeat({len(DAY_PATTERNS)},minmax(250px,1fr));min-width:700px}}
-.cell{{border-left:1px solid #dbe3ec;border-bottom:1px solid #dbe3ec;min-height:95px;padding:6px}}
-.head{{background:#1e3a5f;color:white;min-height:48px;font-weight:bold;text-align:center;display:flex;align-items:center;justify-content:center;position:sticky;top:0;z-index:5}}
-.time{{background:#f1f5f9;font-weight:bold;display:flex;align-items:center;justify-content:center;text-align:center}}
-.card{{border-radius:11px;padding:8px;margin:2px 0;cursor:grab;box-shadow:0 2px 7px rgba(0,0,0,.12);border:1px solid rgba(0,0,0,.10);font-size:12px;text-align:center;user-select:none}}
+.grid{{display:grid;grid-template-columns:150px repeat({len(times)},minmax(120px,1fr));min-width:800px}}
+.cell{{border-left:1px solid #dbe3ec;border-bottom:1px solid #dbe3ec;min-height:60px;padding:4px}}
+.head{{background:#1e3a5f;color:white;min-height:40px;font-weight:bold;text-align:center;display:flex;align-items:center;justify-content:center;position:sticky;top:0;z-index:5}}
+.doctor{{background:#f1f5f9;font-weight:bold;display:flex;align-items:center;justify-content:center;text-align:center}}
+.card{{border-radius:8px;padding:4px;margin:2px 0;cursor:grab;box-shadow:0 2px 7px rgba(0,0,0,.12);border:1px solid rgba(0,0,0,.10);font-size:11px;text-align:center;user-select:none}}
 .card:active{{cursor:grabbing;opacity:.7}}
-.card b{{font-size:13px}}
+.card b{{font-size:12px}}
 .drop{{background:#eff6ff!important;outline:2px dashed #3b82f6;outline-offset:-3px}}
 .hint{{font-size:12px;color:#64748b;padding:8px 2px}}
 </style>
 </head>
 <body>
-<div class="hint">💡 اسحب بطاقة المادة إلى نمط/وقت آخر للتعديل المؤقت. بعد الانتهاء اضغط زر "تحديث الجدول" بالأسفل لحفظ التغييرات (اختياري - لكن يفضل استخدام أزرار التعديل أدناه للحفظ الفعلي).</div>
+<div class="hint">💡 اسحب بطاقة المادة إلى خلية دكتور/وقت أخرى للتعديل المؤقت. استخدم النموذج أدناه للحفظ الفعلي.</div>
 <div class="wrap"><div class="grid" id="grid"></div></div>
 <script>
 const DATA = {json.dumps(payload, ensure_ascii=False)};
@@ -608,17 +653,17 @@ function esc(s) {{
 
 grid.innerHTML = "";
 let h = document.createElement("div");
-h.className="cell head"; h.textContent="الوقت"; grid.appendChild(h);
-
-DATA.days.forEach(day=>{{
- let x=document.createElement("div"); x.className="cell head"; x.textContent=day; grid.appendChild(x);
-}});
+h.className="cell head"; h.textContent="الدكتور"; grid.appendChild(h);
 
 DATA.times.forEach(time=>{{
- let t=document.createElement("div"); t.className="cell time"; t.textContent=time; grid.appendChild(t);
- DATA.days.forEach(day=>{{
+ let x=document.createElement("div"); x.className="cell head"; x.textContent=time; grid.appendChild(x);
+}});
+
+DATA.doctors.forEach(doc=>{{
+ let d=document.createElement("div"); d.className="cell doctor"; d.textContent=doc; grid.appendChild(d);
+ DATA.times.forEach(time=>{{
    let c=document.createElement("div"); c.className="cell dropzone";
-   c.dataset.day=day; c.dataset.time=time;
+   c.dataset.doctor=doc; c.dataset.time=time;
    c.addEventListener("dragover",ev=>{{ev.preventDefault();c.classList.add("drop")}});
    c.addEventListener("dragleave",()=>c.classList.remove("drop"));
    c.addEventListener("drop",ev=>{{
@@ -630,74 +675,88 @@ DATA.times.forEach(time=>{{
       }}
    }});
    grid.appendChild(c);
+   
+   // إضافة البطاقات الموجودة
+   const key = doc + "||" + time;
+   if (DATA.grid[key]) {{
+     DATA.grid[key].forEach(e => {{
+       const card=document.createElement("div");
+       card.className="card"; card.draggable=true;
+       card.dataset.id=e.id;
+       card.style.background=e.color;
+       card.innerHTML="<b>"+esc(e.course)+"</b><br><small>"+esc(e.day)+" - شعبة "+esc(e.section)+"</small>";
+       card.addEventListener("dragstart",ev=>ev.dataTransfer.setData("text/plain",String(e.id)));
+       c.appendChild(card);
+     }});
+   }}
  }});
-}});
-
-DATA.events.forEach(e=>{{
- const cells=[...document.querySelectorAll(".dropzone")];
- const cell=cells.find(x=>x.dataset.day===e.day && x.dataset.time===e.time);
- if(!cell)return;
- const card=document.createElement("div");
- card.className="card"; card.draggable=true;
- card.dataset.id=e.id;
- card.style.background=e.color;
- card.innerHTML="<b>"+esc(e.course)+"</b><br>"+esc(e.doctor)+"<br><small>شعبة "+esc(e.section)+"</small>";
- card.addEventListener("dragstart",ev=>ev.dataTransfer.setData("text/plain",String(e.id)));
- cell.appendChild(card);
 }});
 </script>
 </body></html>
 """
     components.html(component, height=760, scrolling=True)
-    st.caption("ملاحظة: السحب في هذه النسخة يعدّل العرض فقط، ولا يحفظ التغييرات تلقائيًا. استخدم أدوات التعديل أدناه لحفظ التعديلات بشكل دائم.")
+    st.caption("ملاحظة: السحب يعدّل العرض فقط. لحفظ التعديلات بشكل دائم استخدم أدوات التعديل أدناه.")
 
 # ============================================================
-# بيانات تجريبية
+# بيانات تجريبية (10 دكاترة × 4 مواد)
 # ============================================================
 def load_demo_data():
-    D["doctors"] = {
-        "د. أحمد الشريف": {
+    # إنشاء قائمة بأسماء الدكاترة
+    doctor_names = [
+        "د. أحمد الشريف",
+        "د. خالد العتيبي",
+        "د. سارة المطيري",
+        "د. محمد الهاشمي",
+        "د. فاطمة الزهراء",
+        "د. عبدالله الراشد",
+        "د. نورة السبيعي",
+        "د. يوسف الحربي",
+        "د. ريم القحطاني",
+        "د. طلال الغامدي",
+    ]
+    
+    # إعداد الدكاترة
+    D["doctors"] = {}
+    for i, name in enumerate(doctor_names):
+        D["doctors"][name] = {
             "available_patterns": DAY_PATTERNS,
-            "break": "لا يوجد",
-            "preferred_period": "صباحي",
+            "break": "لا يوجد" if i % 3 != 0 else "12:40 - 13:30",
+            "preferred_period": "صباحي" if i % 2 == 0 else "مسائي",
             "max_daily": 3,
-            "color": PALETTE[0],
+            "color": PALETTE[i % len(PALETTE)],
             "blocked_slots": [],
-        },
-        "د. خالد العتيبي": {
-            "available_patterns": DAY_PATTERNS,
-            "break": "12:40 - 13:30",
-            "preferred_period": "مسائي",
-            "max_daily": 2,
-            "color": PALETTE[1],
-            "blocked_slots": [],
-        },
-        "د. سارة المطيري": {
-            "available_patterns": ["السبت / الاثنين"],
-            "break": "لا يوجد",
-            "preferred_period": "كلاهما",
-            "max_daily": 3,
-            "color": PALETTE[2],
-            "blocked_slots": [{"day": "السبت", "start": "08:15", "end": "09:30"}],
-        },
-        "د. محمد الهاشمي": {
-            "available_patterns": ["الأحد / الثلاثاء"],
-            "break": "لا يوجد",
-            "preferred_period": "صباحي",
-            "max_daily": 2,
-            "color": PALETTE[3],
-            "blocked_slots": [],
-        },
-    }
-    D["courses"] = {
-        "C1": {"name": "النحو العربي", "code": "ARB101", "section": "1", "doctor": "د. أحمد الشريف", "hours": 3},
-        "C2": {"name": "الأدب الجاهلي", "code": "ARB102", "section": "1", "doctor": "د. خالد العتيبي", "hours": 2},
-        "C3": {"name": "البلاغة", "code": "ARB201", "section": "1", "doctor": "د. سارة المطيري", "hours": 3},
-        "C4": {"name": "الصرف", "code": "ARB202", "section": "1", "doctor": "د. محمد الهاشمي", "hours": 2},
-        "C5": {"name": "النقد الأدبي", "code": "ARB301", "section": "1", "doctor": "د. أحمد الشريف", "hours": 3},
-        "C6": {"name": "العروض والقافية", "code": "ARB302", "section": "1", "doctor": "د. خالد العتيبي", "hours": 2},
-    }
-    D["next_course_id"] = 7
+        }
+    
+    # قائمة بأسماء المواد (40 مادة)
+    course_names = [
+        "النحو العربي 1", "النحو العربي 2", "الصرف 1", "الصرف 2",
+        "البلاغة 1", "البلاغة 2", "العروض والقافية", "النقد الأدبي القديم",
+        "النقد الأدبي الحديث", "الأدب الجاهلي", "الأدب الأموي", "الأدب العباسي",
+        "الأدب الأندلسي", "الأدب الحديث", "تذوق أدبي", "مكتبة عربية",
+        "تحقيق التراث", "مناهج النقد", "الشعر الجاهلي", "الشعر الأموي",
+        "الشعر العباسي", "النثر العباسي", "النثر الحديث", "قضايا أدبية",
+        "دراسات لغوية", "أصول النحو", "مدارس نحوية", "معاجم عربية",
+        "علم الدلالة", "علم الأصوات", "تاريخ الأدب", "أدب الأطفال",
+        "أدب الرحلة", "أدب السيرة", "قواعد اللغة", "تدريبات لغوية",
+        "الكتابة العربية", "الإنشاء والتعبير", "فقه اللغة", "علم اللغة العام",
+    ]
+    
+    # توزيع المواد: 4 مواد لكل دكتور
+    D["courses"] = {}
+    cid = 1
+    for i, doc in enumerate(doctor_names):
+        for j in range(4):
+            course_name = course_names[i*4 + j]
+            D["courses"][f"C{cid}"] = {
+                "name": course_name,
+                "code": f"ARB{cid}",
+                "section": "1",
+                "doctor": doc,
+                "hours": 3,
+            }
+            cid += 1
+    
+    D["next_course_id"] = cid
     D["next_event_id"] = 1
     D["schedule"] = []
 
@@ -872,7 +931,7 @@ tabs = st.tabs([
 # ------------------------------------------------------------
 with tabs[0]:
     st.subheader("🗓️ الجدول الدراسي التفاعلي")
-    st.write("اسحب أي بطاقة إلى نمط/وقت جديد. التعديل سيكون مؤقتًا للعرض فقط. لحفظ التعديلات بشكل دائم استخدم أزرار التعديل أدناه.")
+    st.write("العرض: الأوقات كأعمدة والدكاترة كصفوف. اسحب أي بطاقة إلى خلية دكتور/وقت أخرى (تعديل مؤقت). للحفظ الفعلي استخدم النموذج أدناه.")
 
     if not D["schedule"]:
         st.info("لا توجد محاضرات مجدولة. أضف الأساتذة والمواد ثم اضغط «توليد أفضل جدول متاح».")
@@ -1187,6 +1246,18 @@ with tabs[4]:
             "text/csv",
             use_container_width=True,
         )
+
+        st.divider()
+        st.subheader("📋 تصدير جدول الدكاترة × الأوقات")
+        if st.button("توليد ملف HTML لجدول الدكاترة"):
+            html_bytes = doctor_time_table_export()
+            st.download_button(
+                "⬇️ تنزيل جدول الدكاترة HTML",
+                html_bytes,
+                "جدول_الدكاترة_والاوقات.html",
+                "text/html",
+                use_container_width=True,
+            )
 
         st.divider()
         st.subheader("👨‍🏫 جداول الأساتذة")
