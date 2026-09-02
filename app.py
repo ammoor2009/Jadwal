@@ -55,7 +55,18 @@ div[data-testid="stMetric"] { direction: rtl; }
 # ============================================================
 # الثوابت
 # ============================================================
-DAYS = ["السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء"]
+# الأيام بنمط مدمج: محاضرة السبت/الاثنين أو الأحد/الثلاثاء
+DAY_PATTERNS = ["السبت / الاثنين", "الأحد / الثلاثاء"]
+ACTUAL_DAYS = ["السبت", "الاثنين", "الأحد", "الثلاثاء"]  # الأيام الفعلية للتوسيع
+
+def expand_day_pattern(pattern):
+    """تحويل النمط إلى قائمة الأيام الفعلية"""
+    if pattern == "السبت / الاثنين":
+        return ["السبت", "الاثنين"]
+    elif pattern == "الأحد / الثلاثاء":
+        return ["الأحد", "الثلاثاء"]
+    else:
+        return []
 
 TIME_OPTIONS = [
     {"start": "08:15", "end": "09:05", "label": "08:15 - 09:05"},
@@ -74,7 +85,6 @@ TIME_OPTIONS = [
 TIME_LABELS = [x["label"] for x in TIME_OPTIONS]
 TIME_MAP = {x["label"]: x for x in TIME_OPTIONS}
 
-DAY_PATTERNS = ["السبت / الاثنين", "الأحد / الثلاثاء", "الأربعاء"]
 PALETTE = [
     "#DBEAFE", "#DCFCE7", "#FEF3C7", "#FCE7F3", "#EDE9FE",
     "#CFFAFE", "#FFEDD5", "#E0E7FF", "#F3E8FF", "#D1FAE5",
@@ -160,57 +170,76 @@ def doctor_color(name):
 def event_course(event):
     return D["courses"].get(event["course_id"], {})
 
-def doctor_available(doctor, day, label):
+def patterns_share_day(pattern1, pattern2):
+    """هل يوجد يوم مشترك بين النمطين؟"""
+    days1 = set(expand_day_pattern(pattern1))
+    days2 = set(expand_day_pattern(pattern2))
+    return not days1.isdisjoint(days2)
+
+def doctor_available(doctor, pattern, label):
+    """التحقق من توفر الدكتور في نمط اليوم (مثل السبت/الاثنين)"""
     info = D["doctors"].get(doctor)
     if not info:
         return False
-    if day not in info.get("days", DAYS):
+    # التحقق من أن الدكتور متاح لهذا النمط
+    if pattern not in info.get("available_patterns", DAY_PATTERNS):
         return False
+    # التحقق من الأوقات المحظورة لكل يوم فعلي في النمط
     s = slot_dict(label)
     for blocked in info.get("blocked_slots", []):
-        if blocked.get("day") == day and overlaps(
-            s["start"], s["end"], blocked["start"], blocked["end"]
-        ):
-            return False
+        # blocked: {"day": "السبت", "start": "08:15", "end": "09:05"}
+        if blocked["day"] in expand_day_pattern(pattern):
+            if overlaps(s["start"], s["end"], blocked["start"], blocked["end"]):
+                return False
+    # التحقق من وقت الاستراحة (ينطبق على جميع الأيام)
     br = info.get("break")
     if br and br != "لا يوجد":
         b = slot_dict(br)
         if overlaps(s["start"], s["end"], b["start"], b["end"]):
             return False
-    # التحقق من الحد الأقصى اليومي
+    # التحقق من الحد الأقصى اليومي (عدد المحاضرات في اليوم الفعلي)
     if "max_daily" in info:
         max_daily = info["max_daily"]
-        daily_count = sum(1 for e in D["schedule"] if e["doctor"] == doctor and e["day"] == day)
-        if daily_count >= max_daily:
-            return False
+        for day in expand_day_pattern(pattern):
+            daily_count = sum(
+                1 for e in D["schedule"]
+                if e["doctor"] == doctor and day in expand_day_pattern(e["day"])
+            )
+            if daily_count >= max_daily:
+                return False
     return True
 
 def event_conflicts(candidate, ignore_id=None):
+    """
+    فحص التعارضات للمحاضرة المرشحة.
+    candidate: قاموس يحتوي على course_id, doctor, day (نمط), time, section
+    """
     problems = []
     cstart = slot_dict(candidate["time"])["start"]
     cend = slot_dict(candidate["time"])["end"]
     course = D["courses"].get(candidate["course_id"], {})
     doctor = candidate["doctor"]
+    pattern = candidate["day"]
 
     # التحقق من توفر الدكتور
-    if not doctor_available(doctor, candidate["day"], candidate["time"]):
-        problems.append("الدكتور غير متاح في هذا اليوم/الوقت، أو تجاوز الحد الأقصى اليومي، أو المحاضرة تقع في وقت استراحته.")
+    if not doctor_available(doctor, pattern, candidate["time"]):
+        problems.append("الدكتور غير متاح في هذا النمط/الوقت، أو تجاوز الحد الأقصى اليومي، أو المحاضرة تقع في وقت استراحته أو وقت محظور.")
 
-    # التحقق من عدد اللقاءات المطلوبة (إن كانت المادة محددة)
-    required_meetings = course.get("meetings", 1)
-    if required_meetings:
-        current_meetings = sum(
-            1 for e in D["schedule"]
-            if e["course_id"] == candidate["course_id"] and e["id"] != ignore_id
-        )
-        if current_meetings >= required_meetings:
-            problems.append("المادة وصلت إلى العدد المطلوب من اللقاءات الأسبوعية.")
+    # التحقق من أن المادة لم تصل للعدد المطلوب (افتراضياً 2 لأن كل نمط يعني لقاءين)
+    required_meetings = 2  # ثابت لأن كل محاضرة تعطى مرتين أسبوعياً (سبت/اثنين أو أحد/ثلاثاء)
+    current_meetings = sum(
+        1 for e in D["schedule"]
+        if e["course_id"] == candidate["course_id"] and e["id"] != ignore_id
+    )
+    if current_meetings >= required_meetings:
+        problems.append("المادة وصلت إلى العدد المطلوب من اللقاءات الأسبوعية (2).")
 
     # فحص التعارض مع المحاضرات الأخرى
     for e in D["schedule"]:
         if e["id"] == ignore_id:
             continue
-        if e["day"] != candidate["day"]:
+        # إذا كان النمطان لا يشتركان في أي يوم، لا يوجد تعارض
+        if not patterns_share_day(pattern, e["day"]):
             continue
         estart = slot_dict(e["time"])["start"]
         eend = slot_dict(e["time"])["end"]
@@ -220,31 +249,20 @@ def event_conflicts(candidate, ignore_id=None):
                 problems.append(f"تعارض مع محاضرة أخرى للدكتور {doctor}.")
             if e["course_id"] == candidate["course_id"]:
                 problems.append("تعارض: للمادة نفسها محاضرة أخرى في الوقت نفسه.")
-
-        # منع وجود شعبتين للمادة في الوقت نفسه إذا كانت المادة نفسها
-        if e["course_id"] == candidate["course_id"] and e["id"] != ignore_id:
-            if overlaps(cstart, cend, estart, eend):
-                problems.append("المادة نفسها لا يمكن أن تكون في شعبتين متزامنتين.")
-
-    # فحص الشعبة
-    if course.get("section"):
-        for e in D["schedule"]:
-            if e["id"] == ignore_id or e["day"] != candidate["day"]:
-                continue
+            # منع شعبتين لنفس المادة في نفس الوقت
             if e["course_id"] == candidate["course_id"] and e.get("section") == candidate.get("section"):
-                if overlaps(cstart, cend, slot_dict(e["time"])["start"], slot_dict(e["time"])["end"]):
-                    problems.append("تعارض في الشعبة نفسها.")
+                problems.append("تعارض في الشعبة نفسها.")
 
     return list(dict.fromkeys(problems))
 
-def add_event(course_id, doctor, day, time_label, section=None):
+def add_event(course_id, doctor, pattern, time_label, section=None):
     course = D["courses"][course_id]
     ev = {
         "id": D["next_event_id"],
         "course_id": course_id,
         "course": course["name"],
         "doctor": doctor,
-        "day": day,
+        "day": pattern,  # النمط
         "time": time_label,
         "section": section or course.get("section", "1"),
         "color": doctor_color(doctor),
@@ -272,11 +290,12 @@ def schedule_quality():
     score -= conflicts * 12
     score -= unavailable * 10
 
-    # مكافأة التوازن اليومي
+    # مكافأة التوازن اليومي (عدد المحاضرات لكل دكتور في كل يوم فعلي)
     by_doc_day = {}
     for e in D["schedule"]:
-        by_doc_day.setdefault((e["doctor"], e["day"]), 0)
-        by_doc_day[(e["doctor"], e["day"])] += 1
+        for day in expand_day_pattern(e["day"]):
+            by_doc_day.setdefault((e["doctor"], day), 0)
+            by_doc_day[(e["doctor"], day)] += 1
     for doctor in D["doctors"]:
         vals = [v for (d, _), v in by_doc_day.items() if d == doctor]
         if vals and max(vals) > 3:
@@ -286,29 +305,19 @@ def schedule_quality():
 
 def build_smart_schedule():
     """
-    خوارزمية توليد الجدول: تحاول توزيع جميع المواد وفقًا للقيود.
-    تقوم أولاً بترتيب المواد حسب عدد اللقاءات ثم تحاول وضعها في أفضل خانة.
+    توليد جدول كامل: كل مادة توضع مرة واحدة في أحد النمطين.
     """
-    # جمع قائمة باللقاءات المطلوبة لكل مادة
-    candidates = []
-    for cid, c in D["courses"].items():
-        meetings = max(1, int(c.get("meetings", 1)))
-        for n in range(meetings):
-            candidates.append((cid, n))
-
-    # ترتيب المواد: المواد التي لديها دكتور أولاً ثم حسب عدد اللقاءات تنازليًا
+    candidates = list(D["courses"].keys())  # كل مادة تمثل محاضرة واحدة بنمط معين
+    # ترتيب المواد: التي لها دكتور أولاً
     candidates.sort(
-        key=lambda x: (
-            0 if D["courses"][x[0]].get("doctor") else 1,
-            -int(D["courses"][x[0]].get("meetings", 1)),
-        )
+        key=lambda cid: 0 if D["courses"][cid].get("doctor") else 1
     )
 
     new_schedule = []
     old_schedule = D["schedule"]
     D["schedule"] = []  # تفريغ مؤقت
 
-    for cid, meeting_no in candidates:
+    for cid in candidates:
         c = D["courses"][cid]
         doctor = c.get("doctor")
         if not doctor or doctor not in D["doctors"]:
@@ -318,14 +327,15 @@ def build_smart_schedule():
         best_score = -10**9
 
         preferred = D["doctors"][doctor].get("preferred_period", "كلاهما")
-        for day in D["doctors"][doctor].get("days", DAYS):
+        # تجربة كل نمط يوم وكل وقت
+        for pattern in DAY_PATTERNS:
             for label in TIME_LABELS:
                 cand = {
                     "id": -1,
                     "course_id": cid,
                     "course": c["name"],
                     "doctor": doctor,
-                    "day": day,
+                    "day": pattern,
                     "time": label,
                     "section": c.get("section", "1"),
                     "color": doctor_color(doctor),
@@ -334,7 +344,7 @@ def build_smart_schedule():
                 if problems:
                     continue
 
-                # حساب درجة الجودة لهذه الخانة
+                # حساب درجة الجودة
                 sc = 0
                 start = minutes(slot_dict(label)["start"])
                 if preferred == "صباحي" and start >= 17 * 60:
@@ -342,19 +352,19 @@ def build_smart_schedule():
                 if preferred == "مسائي" and start < 17 * 60:
                     sc -= 40
 
-                # عدد المحاضرات لنفس الدكتور في نفس اليوم
-                same_day = sum(
-                    1 for e in D["schedule"] if e["doctor"] == doctor and e["day"] == day
+                # عدد المحاضرات لنفس الدكتور في نفس النمط (أي في نفس اليوم الفعلي)
+                same_pattern = sum(
+                    1 for e in D["schedule"] if e["doctor"] == doctor and e["day"] == pattern
                 )
-                sc -= same_day * 7
+                sc -= same_pattern * 7
 
-                # محاولة توزيع اللقاءات لنفس المادة على أيام مختلفة
-                if any(e["course_id"] == cid and e["day"] == day for e in D["schedule"]):
+                # تفضيل توزيع المواد على النمطين بالتساوي (اختياري)
+                if any(e["course_id"] == cid and e["day"] == pattern for e in D["schedule"]):
                     sc -= 35
 
-                # تفضيل القرب الزمني بين محاضرات الدكتور في نفس اليوم (اختياري)
+                # القرب الزمني بين محاضرات نفس الدكتور في نفس النمط
                 doctor_events = [
-                    e for e in D["schedule"] if e["doctor"] == doctor and e["day"] == day
+                    e for e in D["schedule"] if e["doctor"] == doctor and e["day"] == pattern
                 ]
                 for e in doctor_events:
                     gap = abs(start - minutes(slot_dict(e["time"])["start"]))
@@ -363,7 +373,6 @@ def build_smart_schedule():
                     elif gap > 180:
                         sc -= 5
 
-                # عشوائية بسيطة لكسر الجمود
                 sc += random.random() * 0.01
                 if sc > best_score:
                     best_score = sc
@@ -374,16 +383,13 @@ def build_smart_schedule():
             D["next_event_id"] += 1
             D["schedule"].append(best)
         else:
-            # إذا تعذر إيجاد مكان، نستعيد الجدول القديم ونفشل
+            # تعذر إيجاد مكان، استعادة القديم
             D["schedule"] = old_schedule
             return 0
 
-    # التحقق من عدد اللقاءات المطلوبة
-    for cid, c in D["courses"].items():
-        required = int(c.get("meetings", 1))
-        actual = sum(1 for e in D["schedule"] if e["course_id"] == cid)
-        if actual < required:
-            # إذا لم نستطع جدولة العدد المطلوب، نستعيد القديم
+    # التحقق من جدولة جميع المواد
+    for cid in D["courses"]:
+        if not any(e["course_id"] == cid for e in D["schedule"]):
             D["schedule"] = old_schedule
             return 0
 
@@ -398,12 +404,12 @@ def excel_export():
     ws.title = "الجدول"
     ws.sheet_view.rightToLeft = True
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(DAYS)+1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(DAY_PATTERNS)+1)
     ws.cell(1,1).value = f'{D["department"]} — {D["semester"]} {D["academic_year"]}'
     ws.cell(1,1).font = Font(bold=True, size=16)
     ws.cell(1,1).alignment = Alignment(horizontal="center")
 
-    headers = ["الوقت"] + DAYS
+    headers = ["الوقت"] + DAY_PATTERNS
     for j, h in enumerate(headers, 1):
         c = ws.cell(3,j,h)
         c.font = Font(bold=True, color="FFFFFF")
@@ -413,8 +419,8 @@ def excel_export():
     for i, label in enumerate(TIME_LABELS, 4):
         ws.cell(i,1,label).font = Font(bold=True)
         ws.cell(i,1).alignment = Alignment(horizontal="center", vertical="center")
-        for j, day in enumerate(DAYS, 2):
-            events = [e for e in D["schedule"] if e["day"] == day and e["time"] == label]
+        for j, pattern in enumerate(DAY_PATTERNS, 2):
+            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
             text = "\n\n".join(
                 f'{e["course"]}\n{e["doctor"]} — شعبة {e.get("section","1")}'
                 for e in events
@@ -426,12 +432,12 @@ def excel_export():
                 c.fill = PatternFill("solid", fgColor=hexcolor)
 
     for col in range(1, len(headers)+1):
-        ws.column_dimensions[get_column_letter(col)].width = 25 if col > 1 else 20
+        ws.column_dimensions[get_column_letter(col)].width = 30 if col > 1 else 20
 
     # بيانات تفصيلية
     wd = wb.create_sheet("البيانات")
     wd.sheet_view.rightToLeft = True
-    cols = ["الرقم","المادة","الشعبة","الدكتور","اليوم","الوقت"]
+    cols = ["الرقم","المادة","الشعبة","الدكتور","النمط","الوقت"]
     for j,h in enumerate(cols,1):
         wd.cell(1,j,h).font = Font(bold=True)
     for i,e in enumerate(D["schedule"],2):
@@ -457,10 +463,10 @@ def word_export():
     r.bold = True
     r.font.size = Pt(18)
 
-    table = doc.add_table(rows=1, cols=len(DAYS)+1)
+    table = doc.add_table(rows=1, cols=len(DAY_PATTERNS)+1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
-    headers = ["الوقت"] + DAYS
+    headers = ["الوقت"] + DAY_PATTERNS
     for i,h in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = h
@@ -477,8 +483,8 @@ def word_export():
         cells[0].text = label
         for p in cells[0].paragraphs:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for j, day in enumerate(DAYS,1):
-            events = [e for e in D["schedule"] if e["day"] == day and e["time"] == label]
+        for j, pattern in enumerate(DAY_PATTERNS,1):
+            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
             cells[j].text = "\n\n".join(
                 f'{e["course"]}\n{e["doctor"]} — شعبة {e.get("section","1")}' for e in events
             ) or "-"
@@ -499,7 +505,7 @@ def csv_export():
             "المادة": e["course"],
             "الشعبة": e.get("section","1"),
             "الدكتور": e["doctor"],
-            "اليوم": e["day"],
+            "النمط": e["day"],
             "الوقت": e["time"],
         })
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
@@ -508,8 +514,8 @@ def html_print_export():
     rows = []
     for label in TIME_LABELS:
         cells = []
-        for day in DAYS:
-            events = [e for e in D["schedule"] if e["day"] == day and e["time"] == label]
+        for pattern in DAY_PATTERNS:
+            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
             if events:
                 content = "".join(
                     f'<div class="card" style="background:{doctor_color(e["doctor"])}">'
@@ -539,18 +545,29 @@ button{{padding:10px 18px;margin-bottom:12px}}
 <button onclick="window.print()">🖨️ طباعة / حفظ PDF</button>
 <h1>{D["department"]}</h1>
 <h2>{D["semester"]} — {D["academic_year"]}</h2>
-<table><thead><tr><th>الوقت</th>{''.join(f"<th>{x}</th>" for x in DAYS)}</tr></thead>
+<table><thead><tr><th>الوقت</th>{''.join(f"<th>{x}</th>" for x in DAY_PATTERNS)}</tr></thead>
 <tbody>{''.join(rows)}</tbody></table>
 </body></html>"""
     return html.encode("utf-8")
 
 def doctor_html_export(doctor_name):
-    """تصدير جدول خاص بدكتور معين كملف HTML للطباعة."""
+    """تصدير جدول خاص بدكتور معين كملف HTML للطباعة (يعرض الأيام الفعلية)"""
     events = [e for e in D["schedule"] if e["doctor"] == doctor_name]
     if not events:
         return None
 
-    # بناء جدول مبسط: يوم، وقت، مادة، شعبة
+    # بناء جدول مفصل باليوم الفعلي
+    rows = []
+    for e in events:
+        for actual_day in expand_day_pattern(e["day"]):
+            rows.append({
+                "اليوم": actual_day,
+                "الوقت": e["time"],
+                "المادة": e["course"],
+                "الشعبة": e.get("section", "1"),
+            })
+    rows.sort(key=lambda x: (ACTUAL_DAYS.index(x["اليوم"]), TIME_LABELS.index(x["الوقت"])))
+
     html = f"""<!doctype html>
 <html lang="ar" dir="rtl">
 <head><meta charset="utf-8"><title>جدول {doctor_name}</title>
@@ -566,13 +583,13 @@ th{{background:#1f4e78;color:white}}
 <table>
 <tr><th>اليوم</th><th>الوقت</th><th>المادة</th><th>الشعبة</th></tr>
 """
-    for e in sorted(events, key=lambda x: (DAYS.index(x["day"]), TIME_LABELS.index(x["time"]))):
-        html += f"<tr><td>{e['day']}</td><td>{e['time']}</td><td>{e['course']}</td><td>{e.get('section','1')}</td></tr>"
+    for r in rows:
+        html += f"<tr><td>{r['اليوم']}</td><td>{r['الوقت']}</td><td>{r['المادة']}</td><td>{r['الشعبة']}</td></tr>"
     html += "</table><br><button onclick='window.print()'>طباعة / PDF</button></body></html>"
     return html.encode("utf-8")
 
 # ============================================================
-# الواجهة التفاعلية Drag & Drop (مصححة)
+# الواجهة التفاعلية Drag & Drop
 # ============================================================
 def render_drag_drop():
     events = []
@@ -581,14 +598,14 @@ def render_drag_drop():
             "id": e["id"],
             "course": e["course"],
             "doctor": e["doctor"],
-            "day": e["day"],
+            "day": e["day"],  # النمط
             "time": e["time"],
             "section": e.get("section","1"),
             "color": doctor_color(e["doctor"]),
         })
 
     payload = {
-        "days": DAYS,
+        "days": DAY_PATTERNS,
         "times": TIME_LABELS,
         "events": events,
     }
@@ -602,7 +619,7 @@ def render_drag_drop():
 *{{box-sizing:border-box}}
 body{{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f8fafc;color:#0f172a}}
 .wrap{{direction:rtl;overflow:auto;border:1px solid #cbd5e1;border-radius:14px;background:white}}
-.grid{{display:grid;grid-template-columns:150px repeat({len(DAYS)},minmax(175px,1fr));min-width:1050px}}
+.grid{{display:grid;grid-template-columns:150px repeat({len(DAY_PATTERNS)},minmax(250px,1fr));min-width:700px}}
 .cell{{border-left:1px solid #dbe3ec;border-bottom:1px solid #dbe3ec;min-height:95px;padding:6px}}
 .head{{background:#1e3a5f;color:white;min-height:48px;font-weight:bold;text-align:center;display:flex;align-items:center;justify-content:center;position:sticky;top:0;z-index:5}}
 .time{{background:#f1f5f9;font-weight:bold;display:flex;align-items:center;justify-content:center;text-align:center}}
@@ -614,7 +631,7 @@ body{{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f8fafc;color:#0f1
 </style>
 </head>
 <body>
-<div class="hint">💡 اسحب بطاقة المادة إلى يوم/وقت آخر. التغيير يُرسل مباشرة إلى Streamlit.</div>
+<div class="hint">💡 اسحب بطاقة المادة إلى نمط/وقت آخر. التغيير يُرسل مباشرة إلى Streamlit.</div>
 <div class="wrap"><div class="grid" id="grid"></div></div>
 <script>
 const DATA = {json.dumps(payload, ensure_ascii=False)};
@@ -664,30 +681,24 @@ DATA.events.forEach(e=>{{
 </script>
 </body></html>
 """
-    # استخدام مفتاح لتلقي الرسائل
     components.html(component, height=760, key="drag_drop_component", scrolling=True)
 
     # معالجة الرسالة القادمة من المكون
     if "drag_drop_component" in st.session_state and st.session_state.drag_drop_component:
         msg = st.session_state.drag_drop_component
-        # إعادة تعيين القيمة لتجنب إعادة المعالجة
         st.session_state.drag_drop_component = None
         if isinstance(msg, dict) and msg.get("action") == "move":
             event_id = msg.get("id")
             new_day = msg.get("day")
             new_time = msg.get("time")
-            # البحث عن الحدث
             event = next((e for e in D["schedule"] if e["id"] == event_id), None)
             if event:
-                # التحقق من صحة اليوم والوقت
-                if new_day in DAYS and new_time in TIME_LABELS:
-                    # إنشاء نسخة مرشحة للتعديل
+                if new_day in DAY_PATTERNS and new_time in TIME_LABELS:
                     cand = deepcopy(event)
                     cand["day"] = new_day
                     cand["time"] = new_time
                     problems = event_conflicts(cand, ignore_id=event_id)
                     if not problems:
-                        # تطبيق التعديل
                         push_history()
                         event.update({"day": new_day, "time": new_time})
                         st.success(f"تم نقل المحاضرة إلى {new_day} {new_time}.")
@@ -698,6 +709,57 @@ DATA.events.forEach(e=>{{
                     st.error("بيانات غير صالحة.")
             else:
                 st.error("لم يتم العثور على المحاضرة.")
+
+# ============================================================
+# بيانات تجريبية
+# ============================================================
+def load_demo_data():
+    """تحميل بيانات افتراضية للاختبار"""
+    D["doctors"] = {
+        "د. أحمد الشريف": {
+            "available_patterns": DAY_PATTERNS,
+            "break": "لا يوجد",
+            "preferred_period": "صباحي",
+            "max_daily": 3,
+            "color": PALETTE[0],
+            "blocked_slots": [],
+        },
+        "د. خالد العتيبي": {
+            "available_patterns": DAY_PATTERNS,
+            "break": "12:40 - 13:30",
+            "preferred_period": "مسائي",
+            "max_daily": 2,
+            "color": PALETTE[1],
+            "blocked_slots": [],
+        },
+        "د. سارة المطيري": {
+            "available_patterns": ["السبت / الاثنين"],
+            "break": "لا يوجد",
+            "preferred_period": "كلاهما",
+            "max_daily": 3,
+            "color": PALETTE[2],
+            "blocked_slots": [{"day": "السبت", "start": "08:15", "end": "09:30"}],
+        },
+        "د. محمد الهاشمي": {
+            "available_patterns": ["الأحد / الثلاثاء"],
+            "break": "لا يوجد",
+            "preferred_period": "صباحي",
+            "max_daily": 2,
+            "color": PALETTE[3],
+            "blocked_slots": [],
+        },
+    }
+    D["courses"] = {
+        "C1": {"name": "النحو العربي", "code": "ARB101", "section": "1", "doctor": "د. أحمد الشريف", "hours": 3},
+        "C2": {"name": "الأدب الجاهلي", "code": "ARB102", "section": "1", "doctor": "د. خالد العتيبي", "hours": 2},
+        "C3": {"name": "البلاغة", "code": "ARB201", "section": "1", "doctor": "د. سارة المطيري", "hours": 3},
+        "C4": {"name": "الصرف", "code": "ARB202", "section": "1", "doctor": "د. محمد الهاشمي", "hours": 2},
+        "C5": {"name": "النقد الأدبي", "code": "ARB301", "section": "1", "doctor": "د. أحمد الشريف", "hours": 3},
+        "C6": {"name": "العروض والقافية", "code": "ARB302", "section": "1", "doctor": "د. خالد العتيبي", "hours": 2},
+    }
+    D["next_course_id"] = 7
+    D["next_event_id"] = 1
+    D["schedule"] = []  # يترك فارغاً ليتم توليده أو يمكن توليده تلقائياً
 
 # ============================================================
 # رأس التطبيق
@@ -747,13 +809,33 @@ with st.sidebar:
             st.error("ملف المشروع غير صالح.")
 
     st.divider()
+    st.subheader("🧪 بيانات تجريبية")
+    if st.button("📥 تحميل بيانات تجريبية", use_container_width=True):
+        if D["doctors"] or D["courses"]:
+            st.warning("سيتم استبدال البيانات الحالية. هل أنت متأكد؟")
+            if st.button("نعم، استبدل البيانات"):
+                push_history()
+                load_demo_data()
+                st.success("تم تحميل البيانات التجريبية.")
+                st.rerun()
+        else:
+            push_history()
+            load_demo_data()
+            st.success("تم تحميل البيانات التجريبية.")
+            st.rerun()
+
+    st.divider()
     st.subheader("🧑‍🏫 إضافة أستاذ")
     with st.form("doctor_form"):
         name = st.text_input("اسم الدكتور")
-        days = st.multiselect("أيام الدوام", DAYS, default=DAYS[:])
+        available_patterns = st.multiselect(
+            "الأنماط المتاحة (أيام الدوام)",
+            DAY_PATTERNS,
+            default=DAY_PATTERNS[:],
+        )
         br = st.selectbox("وقت الاستراحة", ["لا يوجد"] + TIME_LABELS)
         period = st.selectbox("الفترة المفضلة", ["كلاهما","صباحي","مسائي"])
-        max_daily = st.number_input("الحد الأعلى للمحاضرات يوميًا", 1, 8, 3)
+        max_daily = st.number_input("الحد الأعلى للمحاضرات في اليوم الفعلي", 1, 8, 3)
         submitted = st.form_submit_button("➕ حفظ الأستاذ", use_container_width=True)
         if submitted:
             if not name.strip():
@@ -762,7 +844,7 @@ with st.sidebar:
                 push_history()
                 old = D["doctors"].get(name.strip(), {})
                 D["doctors"][name.strip()] = {
-                    "days": days,
+                    "available_patterns": available_patterns if available_patterns else DAY_PATTERNS,
                     "break": br,
                     "preferred_period": period,
                     "max_daily": int(max_daily),
@@ -788,8 +870,14 @@ with st.sidebar:
         section = st.text_input("الشعبة", "1")
         doctor_options = ["— غير محدد —"] + list(D["doctors"].keys())
         assigned = st.selectbox("الدكتور المكلف", doctor_options)
-        meetings = st.number_input("عدد اللقاءات الأسبوعية", 1, 5, 2)
         hours = st.number_input("الساعات المعتمدة", 1, 6, 3)
+        # عرض مؤشر المواد التي يدرسها الدكتور المحدد
+        if assigned != "— غير محدد —" and assigned in D["doctors"]:
+            doctor_courses = [c["name"] for c in D["courses"].values() if c.get("doctor") == assigned]
+            if doctor_courses:
+                st.info(f"المواد الحالية للدكتور {assigned}: " + "، ".join(doctor_courses))
+            else:
+                st.info(f"لا توجد مواد مسندة للدكتور {assigned} حاليًا.")
         cs = st.form_submit_button("➕ حفظ المادة", use_container_width=True)
         if cs:
             if not cname.strip():
@@ -803,8 +891,8 @@ with st.sidebar:
                     "code": ccode.strip(),
                     "section": section.strip() or "1",
                     "doctor": None if assigned.startswith("—") else assigned,
-                    "meetings": int(meetings),
                     "hours": int(hours),
+                    # ملاحظة: عدد اللقاءات ثابت (2) لأن النمط يتضمن يومين
                 }
                 st.success("تمت إضافة المادة.")
                 st.rerun()
@@ -815,7 +903,7 @@ with st.sidebar:
         push_history()
         n = build_smart_schedule()
         if n > 0:
-            st.success(f"تم توزيع {n} لقاء.")
+            st.success(f"تم توزيع {n} مادة.")
         else:
             st.error("تعذر توليد جدول كامل بدون تعارضات. حاول تعديل القيود.")
         st.rerun()
@@ -846,7 +934,7 @@ tabs = st.tabs([
 # ------------------------------------------------------------
 with tabs[0]:
     st.subheader("🗓️ الجدول الدراسي التفاعلي")
-    st.write("اسحب أي بطاقة إلى يوم/وقت جديد. يمكنك أيضًا استخدام أدوات التعديل أدناه.")
+    st.write("اسحب أي بطاقة إلى نمط/وقت جديد. يمكنك أيضًا استخدام أدوات التعديل أدناه.")
 
     if not D["schedule"]:
         st.info("لا توجد محاضرات مجدولة. أضف الأساتذة والمواد ثم اضغط «توليد أفضل جدول متاح».")
@@ -863,15 +951,16 @@ with tabs[0]:
         eid = int(selected.split("#")[1].split(" ")[0])
         ev = next(e for e in D["schedule"] if e["id"] == eid)
 
-        col1,col2,col3,col4 = st.columns(4)
+        col1,col2,col3 = st.columns(3)
         with col1:
             ndoc = st.selectbox("الدكتور", list(D["doctors"].keys()), index=list(D["doctors"]).index(ev["doctor"]))
         with col2:
-            nday = st.selectbox("اليوم", DAYS, index=DAYS.index(ev["day"]))
+            nday = st.selectbox("النمط", DAY_PATTERNS, index=DAY_PATTERNS.index(ev["day"]))
         with col3:
             ntime = st.selectbox("الوقت", TIME_LABELS, index=TIME_LABELS.index(ev["time"]))
-        with col4:
-            nsec = st.text_input("الشعبة", ev.get("section","1"))
+
+        # الشعبة يمكن تعديلها أيضاً
+        nsec = st.text_input("الشعبة", ev.get("section","1"))
 
         candidate = deepcopy(ev)
         candidate.update({"doctor":ndoc, "day":nday, "time":ntime, "section":nsec})
@@ -900,13 +989,12 @@ with tabs[0]:
         with st.form("add_manual_event"):
             man_course = st.selectbox("المادة", [f"{cid}: {course_label(c)}" for cid,c in D["courses"].items()])
             man_doctor = st.selectbox("الدكتور", list(D["doctors"].keys()))
-            man_day = st.selectbox("اليوم", DAYS)
+            man_day = st.selectbox("النمط", DAY_PATTERNS)
             man_time = st.selectbox("الوقت", TIME_LABELS)
             man_section = st.text_input("الشعبة", "1")
             submitted_manual = st.form_submit_button("إضافة المحاضرة")
             if submitted_manual:
                 course_id = man_course.split(":")[0]
-                # التحقق من صحة المدخلات
                 cand = {
                     "id": -1,
                     "course_id": course_id,
@@ -937,9 +1025,8 @@ with tabs[1]:
     else:
         for doc, info in list(D["doctors"].items()):
             with st.expander(f"👤 {doc}", expanded=False):
-                # عرض البيانات الحالية
                 a,b,c = st.columns(3)
-                a.write("**أيام الدوام:** " + "، ".join(info["days"]))
+                a.write("**الأنماط المتاحة:** " + "، ".join(info["available_patterns"]))
                 b.write("**الاستراحة:** " + info["break"])
                 c.write("**الفترة:** " + info["preferred_period"])
                 st.write(f'الحد الأعلى اليومي: **{info["max_daily"]}**')
@@ -959,15 +1046,27 @@ with tabs[1]:
                 # نموذج تعديل بيانات الأستاذ
                 st.markdown("**تعديل البيانات:**")
                 with st.form(f"edit_doctor_{doc}"):
-                    new_days = st.multiselect("أيام الدوام", DAYS, default=info["days"])
-                    new_break = st.selectbox("وقت الاستراحة", ["لا يوجد"] + TIME_LABELS, index=(["لا يوجد"] + TIME_LABELS).index(info["break"]))
-                    new_period = st.selectbox("الفترة المفضلة", ["كلاهما","صباحي","مسائي"], index=["كلاهما","صباحي","مسائي"].index(info["preferred_period"]))
+                    new_patterns = st.multiselect(
+                        "الأنماط المتاحة",
+                        DAY_PATTERNS,
+                        default=info["available_patterns"],
+                    )
+                    new_break = st.selectbox(
+                        "وقت الاستراحة",
+                        ["لا يوجد"] + TIME_LABELS,
+                        index=(["لا يوجد"] + TIME_LABELS).index(info["break"]),
+                    )
+                    new_period = st.selectbox(
+                        "الفترة المفضلة",
+                        ["كلاهما","صباحي","مسائي"],
+                        index=["كلاهما","صباحي","مسائي"].index(info["preferred_period"]),
+                    )
                     new_max_daily = st.number_input("الحد الأعلى اليومي", 1, 8, info["max_daily"])
                     submit_edit = st.form_submit_button("حفظ التعديلات")
                     if submit_edit:
                         push_history()
                         info.update({
-                            "days": new_days,
+                            "available_patterns": new_patterns,
                             "break": new_break,
                             "preferred_period": new_period,
                             "max_daily": new_max_daily,
@@ -978,7 +1077,7 @@ with tabs[1]:
                 # إدارة الأوقات المحظورة
                 st.markdown("**إضافة وقت محظور:**")
                 with st.form(f"add_blocked_{doc}"):
-                    block_day = st.selectbox("اليوم", DAYS)
+                    block_day = st.selectbox("اليوم الفعلي", ACTUAL_DAYS)
                     block_start = st.selectbox("من", TIME_LABELS)
                     block_end = st.selectbox("إلى", TIME_LABELS, index=len(TIME_LABELS)-1)
                     add_block_btn = st.form_submit_button("إضافة")
@@ -1015,7 +1114,6 @@ with tabs[2]:
     if not D["courses"]:
         st.info("لم تتم إضافة مواد بعد.")
     else:
-        # عرض جدول المواد
         rows = []
         for cid,c in D["courses"].items():
             scheduled = sum(1 for e in D["schedule"] if e["course_id"] == cid)
@@ -1024,7 +1122,6 @@ with tabs[2]:
                 "المادة": c["name"],
                 "الشعبة": c.get("section","1"),
                 "الدكتور": c.get("doctor") or "غير محدد",
-                "اللقاءات المطلوبة": c.get("meetings",1),
                 "اللقاءات المجدولة": scheduled,
                 "الساعات": c.get("hours",3),
             })
@@ -1033,15 +1130,17 @@ with tabs[2]:
         st.divider()
         for cid,c in list(D["courses"].items()):
             with st.expander(f'📖 {course_label(c)}'):
-                # تعديل المادة
                 with st.form(f"edit_course_{cid}"):
                     new_name = st.text_input("اسم المادة", c["name"])
                     new_code = st.text_input("رمز المادة", c.get("code",""))
                     new_section = st.text_input("الشعبة", c.get("section","1"))
                     doctor_options = ["— غير محدد —"] + list(D["doctors"].keys())
                     current_doctor = c.get("doctor") or "— غير محدد —"
-                    new_doctor = st.selectbox("الدكتور", doctor_options, index=doctor_options.index(current_doctor) if current_doctor in doctor_options else 0)
-                    new_meetings = st.number_input("عدد اللقاءات الأسبوعية", 1, 5, c.get("meetings",1))
+                    new_doctor = st.selectbox(
+                        "الدكتور",
+                        doctor_options,
+                        index=doctor_options.index(current_doctor) if current_doctor in doctor_options else 0,
+                    )
                     new_hours = st.number_input("الساعات المعتمدة", 1, 6, c.get("hours",3))
                     submit_edit_course = st.form_submit_button("حفظ التعديلات")
                     if submit_edit_course:
@@ -1054,10 +1153,9 @@ with tabs[2]:
                                 "code": new_code.strip(),
                                 "section": new_section.strip() or "1",
                                 "doctor": None if new_doctor == "— غير محدد —" else new_doctor,
-                                "meetings": int(new_meetings),
                                 "hours": int(new_hours),
                             })
-                            # تحديث أسماء المواد في الجدول
+                            # تحديث المحاضرات المرتبطة
                             for e in D["schedule"]:
                                 if e["course_id"] == cid:
                                     e["course"] = new_name.strip()
@@ -1067,7 +1165,6 @@ with tabs[2]:
                             st.success("تم تحديث المادة.")
                             st.rerun()
 
-                # حذف المادة
                 if st.button("حذف المادة", key=f"del_course_{cid}"):
                     push_history()
                     D["courses"].pop(cid)
@@ -1087,12 +1184,10 @@ with tabs[3]:
             for p in event_conflicts(e, ignore_id=e["id"]):
                 all_issues.append((e, p))
 
-        # إضافة فحص عدد اللقاءات المطلوبة
+        # فحص عدد المواد المجدولة
         for cid, c in D["courses"].items():
-            required = int(c.get("meetings", 1))
-            actual = sum(1 for e in D["schedule"] if e["course_id"] == cid)
-            if actual < required:
-                all_issues.append((None, f"المادة {c['name']} (شعبة {c.get('section','1')}) تحتاج {required} لقاءات، لكن المجدول {actual} فقط."))
+            if not any(e["course_id"] == cid for e in D["schedule"]):
+                all_issues.append((None, f"المادة {c['name']} (شعبة {c.get('section','1')}) غير مجدولة."))
 
         if not all_issues:
             st.success("🟢 ممتاز: لا توجد تعارضات إلزامية في الجدول الحالي.")
@@ -1116,12 +1211,13 @@ with tabs[3]:
             events = [e for e in D["schedule"] if e["doctor"] == doc]
             by_day = {}
             for e in events:
-                by_day[e["day"]] = by_day.get(e["day"],0)+1
+                for day in expand_day_pattern(e["day"]):
+                    by_day[day] = by_day.get(day, 0) + 1
             stats.append({
                 "الدكتور": doc,
-                "عدد اللقاءات": len(events),
-                "أعلى عدد في يوم": max(by_day.values()) if by_day else 0,
-                "الأيام المستخدمة": len(by_day),
+                "عدد المواد": len(events),
+                "أعلى عدد في يوم فعلي": max(by_day.values()) if by_day else 0,
+                "الأيام الفعلية المستخدمة": len(by_day),
             })
         st.dataframe(pd.DataFrame(stats), use_container_width=True, hide_index=True)
 
@@ -1169,17 +1265,19 @@ with tabs[4]:
             if events:
                 col1, col2 = st.columns([3,1])
                 with col1:
-                    st.markdown(f"**{doc}** — {len(events)} لقاء")
-                    st.dataframe(
-                        pd.DataFrame([{
-                            "المادة":e["course"],
-                            "الشعبة":e.get("section","1"),
-                            "اليوم":e["day"],
-                            "الوقت":e["time"]
-                        } for e in events]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    st.markdown(f"**{doc}** — {len(events)} مادة")
+                    # عرض جدول مفصل بالأيام الفعلية
+                    rows = []
+                    for e in events:
+                        for actual_day in expand_day_pattern(e["day"]):
+                            rows.append({
+                                "اليوم": actual_day,
+                                "الوقت": e["time"],
+                                "المادة": e["course"],
+                                "الشعبة": e.get("section","1"),
+                            })
+                    rows.sort(key=lambda x: (ACTUAL_DAYS.index(x["اليوم"]), TIME_LABELS.index(x["الوقت"])))
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
                 with col2:
                     html_bytes = doctor_html_export(doc)
                     if html_bytes:
