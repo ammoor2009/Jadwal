@@ -174,6 +174,14 @@ def patterns_share_day(pattern1, pattern2):
     return not days1.isdisjoint(days2)
 
 def doctor_available(doctor, pattern, label):
+    """
+    التحقق من توفر الدكتور في النمط والوقت.
+    يتضمن:
+    - النمط ضمن الأنماط المتاحة
+    - عدم تعارض الوقت مع وقت محظور أو استراحة
+    - عدم تجاوز الحد الأقصى اليومي
+    - عدم تعارض الوقت مع محاضرة أخرى لنفس الدكتور في نفس اليوم الفعلي
+    """
     info = D["doctors"].get(doctor)
     if not info:
         return False
@@ -189,6 +197,20 @@ def doctor_available(doctor, pattern, label):
         b = slot_dict(br)
         if overlaps(s["start"], s["end"], b["start"], b["end"]):
             return False
+
+    # فحص تعارض الوقت مع محاضرات أخرى لنفس الدكتور في نفس اليوم الفعلي
+    for e in D["schedule"]:
+        if e["doctor"] != doctor:
+            continue
+        # نتحقق من اليوم الفعلي
+        for day in expand_day_pattern(pattern):
+            if day in expand_day_pattern(e["day"]):
+                estart = slot_dict(e["time"])["start"]
+                eend = slot_dict(e["time"])["end"]
+                if overlaps(s["start"], s["end"], estart, eend):
+                    return False
+
+    # فحص الحد الأقصى اليومي
     if "max_daily" in info:
         max_daily = info["max_daily"]
         for day in expand_day_pattern(pattern):
@@ -201,6 +223,10 @@ def doctor_available(doctor, pattern, label):
     return True
 
 def event_conflicts(candidate, ignore_id=None):
+    """
+    فحص التعارضات للمحاضرة المرشحة.
+    candidate: قاموس يحتوي على course_id, doctor, day (نمط), time, section
+    """
     problems = []
     cstart = slot_dict(candidate["time"])["start"]
     cend = slot_dict(candidate["time"])["end"]
@@ -209,8 +235,9 @@ def event_conflicts(candidate, ignore_id=None):
     pattern = candidate["day"]
 
     if not doctor_available(doctor, pattern, candidate["time"]):
-        problems.append("الدكتور غير متاح في هذا النمط/الوقت، أو تجاوز الحد الأقصى اليومي، أو المحاضرة تقع في وقت استراحته أو وقت محظور.")
+        problems.append("الدكتور غير متاح في هذا النمط/الوقت، أو تجاوز الحد الأقصى اليومي، أو المحاضرة تقع في وقت استراحته أو وقت محظور أو متعارضة مع محاضرة أخرى.")
 
+    # التحقق من عدم تجاوز عدد اللقاءات المطلوبة للمادة (2)
     required_meetings = 2
     current_meetings = sum(
         1 for e in D["schedule"]
@@ -219,6 +246,7 @@ def event_conflicts(candidate, ignore_id=None):
     if current_meetings >= required_meetings:
         problems.append("المادة وصلت إلى العدد المطلوب من اللقاءات الأسبوعية (2).")
 
+    # فحص التعارض مع المحاضرات الأخرى
     for e in D["schedule"]:
         if e["id"] == ignore_id:
             continue
@@ -285,6 +313,9 @@ def schedule_quality():
     return max(0, min(100, round(score)))
 
 def build_smart_schedule():
+    """
+    توليد جدول كامل: كل مادة توضع مرة واحدة في أحد النمطين.
+    """
     candidates = list(D["courses"].keys())
     candidates.sort(key=lambda cid: 0 if D["courses"][cid].get("doctor") else 1)
 
@@ -364,44 +395,63 @@ def build_smart_schedule():
     return len(D["schedule"])
 
 # ============================================================
-# التصدير
+# دوال التصدير (تم تعديلها لتطابق الجدول الشبكي)
 # ============================================================
+def _build_grid_data():
+    """بناء مصفوفة الدكاترة × الأوقات مع المحاضرات."""
+    doctors = list(D["doctors"].keys())
+    times = TIME_LABELS
+    grid = {}
+    for doc in doctors:
+        for t in times:
+            events = [e for e in D["schedule"] if e["doctor"] == doc and e["time"] == t]
+            grid[(doc, t)] = events
+    return doctors, times, grid
+
 def excel_export():
     wb = Workbook()
     ws = wb.active
     ws.title = "الجدول"
     ws.sheet_view.rightToLeft = True
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(DAY_PATTERNS)+1)
+    doctors, times, grid = _build_grid_data()
+
+    # عنوان
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(times)+1)
     ws.cell(1,1).value = f'{D["department"]} — {D["semester"]} {D["academic_year"]}'
     ws.cell(1,1).font = Font(bold=True, size=16)
     ws.cell(1,1).alignment = Alignment(horizontal="center")
 
-    headers = ["الوقت"] + DAY_PATTERNS
+    # رأس الجدول
+    headers = ["الدكتور"] + times
     for j, h in enumerate(headers, 1):
         c = ws.cell(3,j,h)
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="1F4E78")
         c.alignment = Alignment(horizontal="center", vertical="center")
 
-    for i, label in enumerate(TIME_LABELS, 4):
-        ws.cell(i,1,label).font = Font(bold=True)
+    # صفوف الدكاترة
+    for i, doc in enumerate(doctors, 4):
+        ws.cell(i,1,doc).font = Font(bold=True)
         ws.cell(i,1).alignment = Alignment(horizontal="center", vertical="center")
-        for j, pattern in enumerate(DAY_PATTERNS, 2):
-            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
-            text = "\n\n".join(
-                f'{e["course"]}\n{e["doctor"]} — شعبة {e.get("section","1")}'
-                for e in events
-            ) or "-"
+        for j, t in enumerate(times, 2):
+            events = grid.get((doc, t), [])
+            text = ""
+            for e in events:
+                text += f'{e["course"]}\n{e["day"]} - شعبة {e.get("section","1")}\n\n'
+            text = text.rstrip("\n") or "-"
             c = ws.cell(i,j,text)
             c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             if events:
-                hexcolor = doctor_color(events[0]["doctor"]).replace("#","")
+                hexcolor = doctor_color(doc).replace("#","")
                 c.fill = PatternFill("solid", fgColor=hexcolor)
 
-    for col in range(1, len(headers)+1):
-        ws.column_dimensions[get_column_letter(col)].width = 30 if col > 1 else 20
+    # عرض الأعمدة
+    ws.column_dimensions[get_column_letter(1)].width = 20
+    for col in range(2, len(times)+2):
+        ws.column_dimensions[get_column_letter(col)].width = 18
 
+    # ورقة البيانات
     wd = wb.create_sheet("البيانات")
     wd.sheet_view.rightToLeft = True
     cols = ["الرقم","المادة","الشعبة","الدكتور","النمط","الوقت"]
@@ -430,10 +480,12 @@ def word_export():
     r.bold = True
     r.font.size = Pt(18)
 
-    table = doc.add_table(rows=1, cols=len(DAY_PATTERNS)+1)
+    doctors, times, grid = _build_grid_data()
+
+    table = doc.add_table(rows=1, cols=len(times)+1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
-    headers = ["الوقت"] + DAY_PATTERNS
+    headers = ["الدكتور"] + times
     for i,h in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = h
@@ -445,20 +497,21 @@ def word_export():
                 rr.bold = True
                 rr.font.color.rgb = RGBColor(255,255,255)
 
-    for label in TIME_LABELS:
+    for doc in doctors:
         cells = table.add_row().cells
-        cells[0].text = label
+        cells[0].text = doc
         for p in cells[0].paragraphs:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for j, pattern in enumerate(DAY_PATTERNS,1):
-            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
-            cells[j].text = "\n\n".join(
-                f'{e["course"]}\n{e["doctor"]} — شعبة {e.get("section","1")}' for e in events
-            ) or "-"
+        for j, t in enumerate(times, 1):
+            events = grid.get((doc, t), [])
+            text = ""
+            for e in events:
+                text += f'{e["course"]}\n{e["day"]} - شعبة {e.get("section","1")}\n\n'
+            cells[j].text = text.rstrip("\n") or "-"
             for p in cells[j].paragraphs:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             if events:
-                set_cell_shading(cells[j], doctor_color(events[0]["doctor"]))
+                set_cell_shading(cells[j], doctor_color(doc))
 
     out = io.BytesIO()
     doc.save(out)
@@ -478,21 +531,23 @@ def csv_export():
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
 
 def html_print_export():
+    doctors, times, grid = _build_grid_data()
+
     rows = []
-    for label in TIME_LABELS:
+    for doc in doctors:
         cells = []
-        for pattern in DAY_PATTERNS:
-            events = [e for e in D["schedule"] if e["day"] == pattern and e["time"] == label]
+        for t in times:
+            events = grid.get((doc, t), [])
             if events:
-                content = "".join(
-                    f'<div class="card" style="background:{doctor_color(e["doctor"])}">'
-                    f'<b>{e["course"]}</b><br>{e["doctor"]}<br>'
-                    f'<small>شعبة {e.get("section","1")}</small></div>' for e in events
-                )
+                content = ""
+                for e in events:
+                    content += f'<div class="card" style="background:{doctor_color(doc)}">'
+                    content += f'<b>{e["course"]}</b><br>{e["day"]}<br>'
+                    content += f'<small>شعبة {e.get("section","1")}</small></div>'
+                cells.append(f"<td>{content}</td>")
             else:
-                content = "-"
-            cells.append(f"<td>{content}</td>")
-        rows.append(f"<tr><th>{label}</th>{''.join(cells)}</tr>")
+                cells.append("<td></td>")
+        rows.append(f"<tr><th>{doc}</th>{''.join(cells)}</tr>")
 
     html = f"""<!doctype html>
 <html lang="ar" dir="rtl">
@@ -512,51 +567,8 @@ button{{padding:10px 18px;margin-bottom:12px}}
 <button onclick="window.print()">🖨️ طباعة / حفظ PDF</button>
 <h1>{D["department"]}</h1>
 <h2>{D["semester"]} — {D["academic_year"]}</h2>
-<table><thead><tr><th>الوقت</th>{''.join(f"<th>{x}</th>" for x in DAY_PATTERNS)}</tr></thead>
+<table><thead><tr><th>الدكتور</th>{''.join(f"<th>{t}</th>" for t in times)}</tr></thead>
 <tbody>{''.join(rows)}</tbody></table>
-</body></html>"""
-    return html.encode("utf-8")
-
-def doctor_time_table_export():
-    """تصدير جدول شبكي (دكاترة × أوقات) كملف HTML"""
-    doctors = list(D["doctors"].keys())
-    times = TIME_LABELS
-    
-    # بناء الصفوف: لكل دكتور صف، ولكل وقت خلية
-    rows = []
-    for doc in doctors:
-        row_cells = []
-        for t in times:
-            # العثور على محاضرات هذا الدكتور في هذا الوقت
-            events = [e for e in D["schedule"] if e["doctor"] == doc and e["time"] == t]
-            if events:
-                cell_content = "<br>".join(
-                    f'{e["course"]}<br><small>{e["day"]} - شعبة {e.get("section","1")}</small>'
-                    for e in events
-                )
-                row_cells.append(f'<td style="background:{doctor_color(doc)}">{cell_content}</td>')
-            else:
-                row_cells.append("<td></td>")
-        rows.append(f"<tr><th>{doc}</th>{''.join(row_cells)}</tr>")
-
-    html = f"""<!doctype html>
-<html lang="ar" dir="rtl">
-<head><meta charset="utf-8"><title>جدول الدكاترة</title>
-<style>
-body{{font-family:Arial,Tahoma,sans-serif;direction:rtl;margin:20px}}
-h2{{text-align:center}}
-table{{border-collapse:collapse;width:100%;table-layout:fixed;font-size:12px}}
-th,td{{border:1px solid #333;padding:6px;text-align:center;vertical-align:middle}}
-th{{background:#1f4e78;color:white}}
-td{{min-width:80px}}
-</style></head>
-<body>
-<h2>جدول الدكاترة والأوقات</h2>
-<table>
-<thead><tr><th>الدكتور</th>{''.join(f"<th>{t}</th>" for t in times)}</tr></thead>
-<tbody>{''.join(rows)}</tbody>
-</table>
-<br><button onclick='window.print()'>طباعة / PDF</button>
 </body></html>"""
     return html.encode("utf-8")
 
@@ -603,7 +615,6 @@ def render_drag_drop():
     doctors = list(D["doctors"].keys())
     times = TIME_LABELS
 
-    # تجهيز بيانات المحاضرات لكل خلية (doctor, time)
     grid_data = {}
     for e in D["schedule"]:
         key = (e["doctor"], e["time"])
@@ -676,7 +687,6 @@ DATA.doctors.forEach(doc=>{{
    }});
    grid.appendChild(c);
    
-   // إضافة البطاقات الموجودة
    const key = doc + "||" + time;
    if (DATA.grid[key]) {{
      DATA.grid[key].forEach(e => {{
@@ -701,7 +711,6 @@ DATA.doctors.forEach(doc=>{{
 # بيانات تجريبية (10 دكاترة × 4 مواد)
 # ============================================================
 def load_demo_data():
-    # إنشاء قائمة بأسماء الدكاترة
     doctor_names = [
         "د. أحمد الشريف",
         "د. خالد العتيبي",
@@ -715,7 +724,6 @@ def load_demo_data():
         "د. طلال الغامدي",
     ]
     
-    # إعداد الدكاترة
     D["doctors"] = {}
     for i, name in enumerate(doctor_names):
         D["doctors"][name] = {
@@ -727,7 +735,6 @@ def load_demo_data():
             "blocked_slots": [],
         }
     
-    # قائمة بأسماء المواد (40 مادة)
     course_names = [
         "النحو العربي 1", "النحو العربي 2", "الصرف 1", "الصرف 2",
         "البلاغة 1", "البلاغة 2", "العروض والقافية", "النقد الأدبي القديم",
@@ -741,7 +748,6 @@ def load_demo_data():
         "الكتابة العربية", "الإنشاء والتعبير", "فقه اللغة", "علم اللغة العام",
     ]
     
-    # توزيع المواد: 4 مواد لكل دكتور
     D["courses"] = {}
     cid = 1
     for i, doc in enumerate(doctor_names):
@@ -905,6 +911,26 @@ with st.sidebar:
             st.error("تعذر توليد جدول كامل بدون تعارضات. حاول تعديل القيود.")
         st.rerun()
 
+    # زر توليد عدة نماذج
+    if st.button("🔀 توليد 3 نماذج مقترحة", use_container_width=True):
+        # حفظ الحالة الحالية
+        original_state = snapshot()
+        proposals = []
+        for i in range(3):
+            # توليد حل جديد
+            D["schedule"] = []
+            n = build_smart_schedule()
+            if n > 0:
+                proposals.append(deepcopy(D["schedule"]))
+            else:
+                proposals.append(None)
+        # استعادة الحالة الأصلية
+        restore_snapshot(original_state)
+        # تخزين المقترحات في st.session_state
+        st.session_state.proposals = proposals
+        st.session_state.show_proposals = True
+        st.rerun()
+
     if st.button("🧹 تفريغ الجدول فقط", use_container_width=True):
         push_history()
         D["schedule"] = []
@@ -914,6 +940,33 @@ with st.sidebar:
         if st.warning("هل أنت متأكد؟ سيتم حذف جميع البيانات نهائيًا."):
             st.session_state.data = default_state()
             st.rerun()
+
+# ============================================================
+# عرض المقترحات إذا وجدت
+# ============================================================
+if st.session_state.get("show_proposals"):
+    st.markdown("---")
+    st.subheader("🔀 النماذج المقترحة للجدول")
+    proposals = st.session_state.get("proposals", [])
+    for idx, sched in enumerate(proposals):
+        with st.expander(f"النموذج {idx+1} ({'صالح' if sched else 'غير صالح'})"):
+            if sched:
+                # عرض الجدول بشكل مبسط
+                st.write(f"عدد المحاضرات: {len(sched)}")
+                st.dataframe(pd.DataFrame([{
+                    "المادة": e["course"],
+                    "الدكتور": e["doctor"],
+                    "النمط": e["day"],
+                    "الوقت": e["time"],
+                    "الشعبة": e.get("section","1"),
+                } for e in sched]), use_container_width=True, hide_index=True)
+                if st.button(f"تطبيق النموذج {idx+1}", key=f"apply_{idx}"):
+                    push_history()
+                    D["schedule"] = deepcopy(sched)
+                    st.session_state.show_proposals = False
+                    st.rerun()
+            else:
+                st.write("تعذر توليد جدول صالح لهذا النموذج.")
 
 # ============================================================
 # التبويبات
@@ -970,7 +1023,14 @@ with tabs[0]:
         with col_btn1:
             if st.button("💾 حفظ التعديل", type="primary", use_container_width=True):
                 push_history()
-                ev.update({"doctor":ndoc,"day":nday,"time":ntime,"section":nsec,"color":doctor_color(ndoc)})
+                # تحديث بيانات الحدث مع تغيير اللون تلقائيًا
+                ev.update({
+                    "doctor": ndoc,
+                    "day": nday,
+                    "time": ntime,
+                    "section": nsec,
+                    "color": doctor_color(ndoc)
+                })
                 st.success("تم حفظ التعديل.")
                 st.rerun()
         with col_btn2:
@@ -1246,18 +1306,6 @@ with tabs[4]:
             "text/csv",
             use_container_width=True,
         )
-
-        st.divider()
-        st.subheader("📋 تصدير جدول الدكاترة × الأوقات")
-        if st.button("توليد ملف HTML لجدول الدكاترة"):
-            html_bytes = doctor_time_table_export()
-            st.download_button(
-                "⬇️ تنزيل جدول الدكاترة HTML",
-                html_bytes,
-                "جدول_الدكاترة_والاوقات.html",
-                "text/html",
-                use_container_width=True,
-            )
 
         st.divider()
         st.subheader("👨‍🏫 جداول الأساتذة")
